@@ -47,19 +47,6 @@ st.markdown("""
         font-weight: 700;
         color: #667eea;
     }
-    .category-tag {
-        display: inline-block;
-        padding: 2px 10px;
-        border-radius: 12px;
-        font-size: 0.75rem;
-        font-weight: 600;
-    }
-    .delete-section {
-        background: #2d1b1b;
-        border: 1px solid #ff4b4b;
-        border-radius: 10px;
-        padding: 15px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -83,8 +70,8 @@ st.title("🚗 Trip Expense Tracker")
 # --- CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- READ DATA ---
-df = conn.read(worksheet="Sheet1", usecols=list(range(4)))
+# --- READ DATA (ttl=0 forces fresh read every time, no caching) ---
+df = conn.read(worksheet="Sheet1", usecols=list(range(4)), ttl=0)
 df = df.dropna(how="all")
 
 # Ensure correct columns exist
@@ -100,11 +87,13 @@ else:
 df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
 df["Date"] = df["Date"].astype(str)
 
+# Reset index to avoid issues
+df = df.reset_index(drop=True)
+
 # --- METRICS ROW ---
 total_spent = df["Amount"].sum()
 num_expenses = len(df)
 avg_expense = total_spent / num_expenses if num_expenses > 0 else 0
-highest = df["Amount"].max() if num_expenses > 0 else 0
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -116,12 +105,13 @@ with col3:
 
 # --- CATEGORY BREAKDOWN ---
 if not df.empty and "Category" in df.columns:
-    st.markdown("---")
-    st.subheader("📂 Spending by Category")
-    
-    category_totals = df.groupby("Category")["Amount"].sum().sort_values(ascending=False)
-    
-    if not category_totals.empty:
+    cat_data = df[df["Category"].astype(str).str.strip() != ""]
+    if not cat_data.empty:
+        st.markdown("---")
+        st.subheader("📂 Spending by Category")
+        
+        category_totals = cat_data.groupby("Category")["Amount"].sum().sort_values(ascending=False)
+        
         for cat, amount in category_totals.items():
             percentage = (amount / total_spent * 100) if total_spent > 0 else 0
             col_a, col_b = st.columns([3, 1])
@@ -157,6 +147,7 @@ with st.form("add_expense", clear_on_submit=True):
         elif amount <= 0:
             st.error("⚠️ Amount must be greater than zero!")
         else:
+            # Create new row and append to existing data
             new_row = pd.DataFrame([{
                 "Item": item,
                 "Amount": amount,
@@ -164,7 +155,10 @@ with st.form("add_expense", clear_on_submit=True):
                 "Date": expense_date.strftime("%Y-%m-%d"),
             }])
             updated_df = pd.concat([df, new_row], ignore_index=True)
+            
+            # Write ALL data back to sheet (header + all rows)
             conn.update(worksheet="Sheet1", data=updated_df)
+            st.cache_data.clear()
             st.success(f"✅ Added **{item}** — ₹{amount:,.2f}")
             st.balloons()
             st.rerun()
@@ -187,25 +181,27 @@ else:
     
     if search:
         filtered_df = filtered_df[
-            filtered_df["Item"].str.contains(search, case=False, na=False)
+            filtered_df["Item"].astype(str).str.contains(search, case=False, na=False)
         ]
     if filter_cat != "All":
         filtered_df = filtered_df[filtered_df["Category"] == filter_cat]
     
-    # Sort by date (newest first)
-    filtered_df = filtered_df.sort_index(ascending=False)
+    # Sort newest first
+    filtered_df = filtered_df.iloc[::-1]
     
     if filtered_df.empty:
         st.warning("No expenses match your search/filter.")
     else:
         # Display as styled cards
         for idx, row in filtered_df.iterrows():
+            cat_display = row.get("Category", "")
+            date_display = row.get("Date", "")
             st.markdown(f"""
             <div class="expense-card">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div>
                         <div class="expense-item">{row['Item']}</div>
-                        <div class="expense-details">{row.get('Category', '')} &nbsp;•&nbsp; {row.get('Date', '')}</div>
+                        <div class="expense-details">{cat_display} &nbsp;•&nbsp; {date_display}</div>
                     </div>
                     <div class="expense-amount">₹ {row['Amount']:,.2f}</div>
                 </div>
@@ -219,7 +215,6 @@ else:
     with st.expander("🗑️ Delete an Expense"):
         st.warning("⚠️ This action cannot be undone!")
         
-        # Create display labels for selection
         delete_options = []
         for idx, row in df.iterrows():
             label = f"#{idx + 1} — {row['Item']} — ₹{row['Amount']:,.2f} ({row.get('Date', 'N/A')})"
@@ -228,10 +223,10 @@ else:
         selected = st.selectbox("Select expense to delete", delete_options)
         
         if st.button("🗑️ Delete Selected", type="primary"):
-            # Get the index from the selection
             selected_idx = delete_options.index(selected)
             updated_df = df.drop(index=selected_idx).reset_index(drop=True)
             conn.update(worksheet="Sheet1", data=updated_df)
+            st.cache_data.clear()
             st.success("Expense deleted!")
             st.rerun()
 
