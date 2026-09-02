@@ -1,11 +1,12 @@
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-from datetime import datetime, date
+from datetime import date
+from html import escape
 
 st.set_page_config(page_title="Trip Expenses", page_icon="🚗", layout="centered")
 
-# Custom CSS for better mobile experience
+# --- CUSTOM CSS ---
 st.markdown("""
 <style>
     .stMetric {
@@ -51,30 +52,45 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CATEGORY CONFIG ---
-CATEGORIES = {
-    "🍔 Food": "#FF6B6B",
-    "⛽ Fuel": "#FFA94D",
-    "🏨 Stay": "#51CF66",
-    "🎟️ Tickets": "#339AF0",
-    "🛍️ Shopping": "#CC5DE8",
-    "🚕 Transport": "#20C997",
-    "💊 Medical": "#FF8787",
-    "📱 Recharge": "#748FFC",
-    "🎉 Fun": "#F06595",
-    "📦 Other": "#868E96",
-}
+CATEGORIES = [
+    "🍔 Food",
+    "⛽ Fuel",
+    "🏨 Stay",
+    "🎟️ Tickets",
+    "🛍️ Shopping",
+    "🚕 Transport",
+    "💊 Medical",
+    "📱 Recharge",
+    "🎉 Fun",
+    "📦 Other",
+]
 
 # --- HEADER ---
 st.title("🚗 Trip Expense Tracker")
 
-# --- CONNECTION ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+# --- SHOW SUCCESS MESSAGE FROM PREVIOUS ACTION (session_state) ---
+if "success_msg" in st.session_state:
+    st.toast(st.session_state.success_msg, icon="✅")
+    del st.session_state.success_msg
 
-# --- READ DATA (ttl=0 forces fresh read every time, no caching) ---
-df = conn.read(worksheet="Sheet1", usecols=list(range(4)), ttl=0)
-df = df.dropna(how="all")
+# --- CONNECTION WITH ERROR HANDLING ---
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+except Exception as e:
+    st.error("❌ Could not connect to Google Sheets. Please check your secrets configuration.")
+    st.code(str(e))
+    st.stop()
 
-# Ensure correct columns exist
+# --- READ DATA (ttl=5 for light caching, avoids API rate limits) ---
+try:
+    df = conn.read(worksheet="Sheet1", usecols=list(range(4)), ttl=5)
+    df = df.dropna(how="all")
+except Exception as e:
+    st.error("❌ Could not read data from Google Sheets.")
+    st.code(str(e))
+    st.stop()
+
+# --- ENSURE CORRECT COLUMNS ---
 expected_cols = ["Item", "Amount", "Category", "Date"]
 if df.empty:
     df = pd.DataFrame(columns=expected_cols)
@@ -83,11 +99,11 @@ else:
         if col not in df.columns:
             df[col] = ""
 
-# Clean data types
+# --- CLEAN DATA TYPES ---
 df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
-df["Date"] = df["Date"].astype(str)
-
-# Reset index to avoid issues
+df["Date"] = df["Date"].astype(str).replace("nan", "")
+df["Item"] = df["Item"].astype(str).replace("nan", "")
+df["Category"] = df["Category"].astype(str).replace("nan", "")
 df = df.reset_index(drop=True)
 
 # --- METRICS ROW ---
@@ -105,13 +121,11 @@ with col3:
 
 # --- CATEGORY BREAKDOWN ---
 if not df.empty and "Category" in df.columns:
-    cat_data = df[df["Category"].astype(str).str.strip() != ""]
+    cat_data = df[df["Category"].str.strip() != ""]
     if not cat_data.empty:
         st.markdown("---")
         st.subheader("📂 Spending by Category")
-        
         category_totals = cat_data.groupby("Category")["Amount"].sum().sort_values(ascending=False)
-        
         for cat, amount in category_totals.items():
             percentage = (amount / total_spent * 100) if total_spent > 0 else 0
             col_a, col_b = st.columns([3, 1])
@@ -126,41 +140,34 @@ st.subheader("➕ Add New Expense")
 
 with st.form("add_expense", clear_on_submit=True):
     col1, col2 = st.columns(2)
-    
     with col1:
         item = st.text_input("📝 What for?", placeholder="e.g., Lunch at restaurant")
     with col2:
         amount = st.number_input("💵 How much? (₹)", min_value=0.0, step=10.0, format="%.2f")
-    
     col3, col4 = st.columns(2)
-    
     with col3:
-        category = st.selectbox("📂 Category", list(CATEGORIES.keys()))
+        category = st.selectbox("📂 Category", CATEGORIES)
     with col4:
         expense_date = st.date_input("📅 Date", value=date.today())
-    
+
     submitted = st.form_submit_button("✅ Add Expense", use_container_width=True)
-    
+
     if submitted:
-        if not item:
+        if not item.strip():
             st.error("⚠️ Please enter what the expense is for!")
         elif amount <= 0:
             st.error("⚠️ Amount must be greater than zero!")
         else:
-            # Create new row and append to existing data
             new_row = pd.DataFrame([{
-                "Item": item,
+                "Item": item.strip(),
                 "Amount": amount,
                 "Category": category,
                 "Date": expense_date.strftime("%Y-%m-%d"),
             }])
             updated_df = pd.concat([df, new_row], ignore_index=True)
-            
-            # Write ALL data back to sheet (header + all rows)
             conn.update(worksheet="Sheet1", data=updated_df)
             st.cache_data.clear()
-            st.success(f"✅ Added **{item}** — ₹{amount:,.2f}")
-            st.balloons()
+            st.session_state.success_msg = f"Added {item.strip()} — ₹{amount:,.2f}"
             st.rerun()
 
 # --- EXPENSE HISTORY ---
@@ -175,59 +182,61 @@ else:
     with col_search:
         search = st.text_input("🔍 Search expenses", placeholder="Type to search...")
     with col_filter:
-        filter_cat = st.selectbox("Filter by category", ["All"] + list(CATEGORIES.keys()))
-    
+        filter_cat = st.selectbox("Filter by category", ["All"] + CATEGORIES)
+
     filtered_df = df.copy()
-    
+
     if search:
         filtered_df = filtered_df[
-            filtered_df["Item"].astype(str).str.contains(search, case=False, na=False)
+            filtered_df["Item"].str.contains(search, case=False, na=False, regex=False)
         ]
     if filter_cat != "All":
         filtered_df = filtered_df[filtered_df["Category"] == filter_cat]
-    
+
     # Sort newest first
     filtered_df = filtered_df.iloc[::-1]
-    
+
     if filtered_df.empty:
         st.warning("No expenses match your search/filter.")
     else:
-        # Display as styled cards
+        # Display as styled cards (with HTML-escaped user input)
         for idx, row in filtered_df.iterrows():
-            cat_display = row.get("Category", "")
-            date_display = row.get("Date", "")
+            safe_item = escape(str(row["Item"]))
+            safe_category = escape(str(row.get("Category", "")))
+            safe_date = escape(str(row.get("Date", "")))
             st.markdown(f"""
             <div class="expense-card">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div>
-                        <div class="expense-item">{row['Item']}</div>
-                        <div class="expense-details">{cat_display} &nbsp;•&nbsp; {date_display}</div>
+                        <div class="expense-item">{safe_item}</div>
+                        <div class="expense-details">{safe_category} &nbsp;•&nbsp; {safe_date}</div>
                     </div>
                     <div class="expense-amount">₹ {row['Amount']:,.2f}</div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-        
+
         st.caption(f"Showing {len(filtered_df)} of {len(df)} expenses")
 
     # --- DELETE EXPENSE ---
     st.markdown("---")
     with st.expander("🗑️ Delete an Expense"):
         st.warning("⚠️ This action cannot be undone!")
-        
-        delete_options = []
+
+        # Build delete options with unique index prefix
+        delete_options = {}
         for idx, row in df.iterrows():
             label = f"#{idx + 1} — {row['Item']} — ₹{row['Amount']:,.2f} ({row.get('Date', 'N/A')})"
-            delete_options.append(label)
-        
-        selected = st.selectbox("Select expense to delete", delete_options)
-        
+            delete_options[label] = idx
+
+        selected = st.selectbox("Select expense to delete", list(delete_options.keys()))
+
         if st.button("🗑️ Delete Selected", type="primary"):
-            selected_idx = delete_options.index(selected)
+            selected_idx = delete_options[selected]
             updated_df = df.drop(index=selected_idx).reset_index(drop=True)
             conn.update(worksheet="Sheet1", data=updated_df)
             st.cache_data.clear()
-            st.success("Expense deleted!")
+            st.session_state.success_msg = "Expense deleted successfully!"
             st.rerun()
 
 # --- FOOTER ---
